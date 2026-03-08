@@ -21,9 +21,24 @@ Trois outils indépendants :
 ### 🤖 Voice Chat
 Conversation vocale complète et multi-turn :
 1. L'utilisateur parle → transcription automatique
-2. Le LLM génère une réponse en streaming
-3. Dès qu'une phrase est complète, elle est envoyée au TTS et lue immédiatement
-4. Bouton pause/reprendre pendant la lecture
+2. Le contenu transcrit est modéré avant traitement
+3. Le LLM génère une réponse en streaming
+4. Dès qu'une phrase est complète, elle est envoyée au TTS et lue immédiatement
+5. Bouton pause/reprendre pendant la lecture
+
+### 🛡️ Modération
+Tous les contenus utilisateur passent par l'API de modération OpenAI (`omni-moderation-latest`) avant traitement, sur **tous les onglets** :
+
+| Onglet | Ce qui est modéré |
+|---|---|
+| Text Chat | Message texte avant envoi au LLM |
+| Image | Prompt avant génération |
+| Audio — STT | Texte transcrit depuis le micro |
+| Audio — Traduction | Texte traduit depuis le micro |
+| Audio — TTS | Texte saisi avant synthèse vocale |
+| Voice Chat | Transcription de la voix avant envoi au LLM |
+
+En cas de contenu refusé, l'API retourne une **erreur générique** (`🚫 Ce contenu ne peut pas être traité.`) sans exposer la catégorie au client. Les détails sont loggés côté serveur uniquement.
 
 ---
 
@@ -32,7 +47,8 @@ Conversation vocale complète et multi-turn :
 ```
 chatbot-app/
 ├── main.py           # Backend FastAPI — routes API et streaming SSE
-├── utils.py          # Fonctions OpenAI (LLM, TTS, STT, image)
+├── utils.py          # Fonctions OpenAI (LLM, TTS, STT, image, modération)
+├── config.py         # Configuration centralisée via pydantic-settings
 ├── static/
 │   └── index.html    # Frontend complet (HTML + CSS + JS)
 ├── temporary_files/  # Fichiers audio temporaires (créé automatiquement)
@@ -44,24 +60,37 @@ chatbot-app/
 ```
 [Navigateur]
     │
-    ├── POST /api/chat/stream       → SSE tokens LLM
-    ├── POST /api/image             → JSON base64
-    ├── POST /api/transcribe        → JSON texte
-    ├── POST /api/translate         → JSON texte
-    ├── POST /api/tts               → fichier WAV
-    └── POST /api/voice-chat/stream → SSE (transcription + tokens + audio WAV base64)
+    ├── POST /api/chat/stream       → modération → SSE tokens LLM
+    ├── POST /api/image             → modération → JSON base64
+    ├── POST /api/transcribe        → STT → modération → JSON texte
+    ├── POST /api/translate         → STT → modération → JSON texte
+    ├── POST /api/tts               → modération → fichier WAV
+    ├── POST /api/moderate          → JSON résultat modération
+    └── POST /api/voice-chat/stream → STT → modération → SSE (tokens + audio WAV base64)
 ```
 
-### Streaming SSE (Voice Chat)
-
-Le voice chat utilise une pipeline phrase par phrase pour minimiser la latence :
+### Pipeline Modération
 
 ```
-Audio micro → STT → LLM stream → [phrase détectée] → TTS → audio envoyé au navigateur
-                                        ↑                         ↓
-                                   accumulation              lecture immédiate
-                                    du buffer               pendant que le LLM
-                                                             continue de générer
+Contenu utilisateur (texte ou transcription)
+        │
+        ▼
+_check_moderation()
+        │
+        ├── flagged → HTTP 422  →  message générique au client
+        │                          catégories loggées côté serveur
+        │
+        └── ok → traitement normal (LLM / TTS / image)
+```
+
+### Pipeline Voice Chat
+
+```
+Audio micro → STT → modération → LLM stream → [phrase détectée] → TTS → audio navigateur
+                                                     ↑                        ↓
+                                                accumulation             lecture immédiate
+                                                 du buffer              pendant que le LLM
+                                                                         continue de générer
 ```
 
 ---
@@ -71,7 +100,7 @@ Audio micro → STT → LLM stream → [phrase détectée] → TTS → audio env
 ### Prérequis
 
 - Python 3.11+
-- ffmpeg (pour la conversion audio)
+- ffmpeg (conversion audio WebM → WAV)
 
 ```bash
 # macOS
@@ -89,7 +118,7 @@ git clone <repo>
 cd chatbot-app
 
 # Installer les dépendances Python
-pip install fastapi uvicorn python-multipart openai pydub python-dotenv colorama
+pip install fastapi uvicorn python-multipart openai pydub pydantic-settings
 
 # Créer le fichier .env
 echo "OPENAI_API_KEY=sk-..." > .env
@@ -104,17 +133,23 @@ Ouvrir `http://localhost:8000`
 
 ## Configuration
 
-Tous les paramètres sont accessibles depuis le header de l'interface :
+Tous les paramètres par défaut sont centralisés dans `config.py` via `pydantic-settings`. Ils peuvent être surchargés par des variables d'environnement dans le fichier `.env`.
 
-| Paramètre | Description | Valeurs possibles |
+| Variable `.env` | Description | Défaut |
 |---|---|---|
-| Text model | Modèle LLM pour le chat | `gpt-4o-mini`, `gpt-4o`, `gpt-3.5-turbo` |
-| Temperature | Créativité des réponses | 0.0 → 1.5 |
-| Image model | Modèle de génération d'images | `gpt-image-1`, `gpt-image-1-mini` |
-| STT | Modèle de transcription | `gpt-4o-transcribe`, `whisper-1` |
-| Voice | Voix TTS | `alloy`, `echo`, `fable`, `onyx`, `nova`, `shimmer` |
-| TTS model | Modèle de synthèse vocale | `tts-1`, `tts-1-hd` |
-| Speed | Vitesse de lecture | 0.5 → 2.0 |
+| `OPENAI_API_KEY` | Clé API OpenAI **(obligatoire)** | — |
+| `DEFAULT_TEXT_MODEL` | Modèle LLM | `gpt-4o-mini` |
+| `DEFAULT_TEMPERATURE` | Température LLM | `0.7` |
+| `DEFAULT_IMAGE_MODEL` | Modèle image | `gpt-image-1` |
+| `DEFAULT_IMAGE_SIZE` | Taille image | `1024x1024` |
+| `DEFAULT_STT_MODEL` | Modèle transcription | `gpt-4o-transcribe` |
+| `DEFAULT_TTS_MODEL` | Modèle synthèse vocale | `tts-1` |
+| `DEFAULT_TTS_VOICE` | Voix TTS | `alloy` |
+| `DEFAULT_TTS_SPEED` | Vitesse TTS | `1.0` |
+| `SYSTEM_MESSAGE` | System prompt du LLM | *(voir config.py)* |
+| `TMP_DIR` | Dossier fichiers temporaires | `temporary_files` |
+
+Les paramètres sont également ajustables en temps réel depuis le header de l'interface.
 
 ---
 
@@ -129,6 +164,15 @@ Tous les paramètres sont accessibles depuis le header de l'interface :
 | `POST` | `/api/translate` | Traduction audio → anglais |
 | `POST` | `/api/tts` | Synthèse texte → audio WAV |
 | `POST` | `/api/voice-chat/stream` | Pipeline voix complète en streaming SSE |
+| `POST` | `/api/moderate` | Modération d'un texte — retourne `{ flagged: bool }` |
+
+### Codes de réponse
+
+| Code | Signification |
+|---|---|
+| `200` | Succès |
+| `422` | Contenu refusé par la modération — message générique, détails côté serveur uniquement |
+| `500` | Erreur serveur (OpenAI API, ffmpeg, etc.) |
 
 ---
 
@@ -138,7 +182,7 @@ Tous les paramètres sont accessibles depuis le header de l'interface :
 |---|---|
 | `fastapi` | Framework web backend |
 | `uvicorn` | Serveur ASGI |
-| `openai` | SDK OpenAI (LLM, TTS, STT, image) |
+| `openai` | SDK OpenAI (LLM, TTS, STT, image, modération) |
 | `pydub` | Conversion audio WebM → WAV |
 | `python-multipart` | Upload de fichiers audio |
-| `python-dotenv` | Chargement de la clé API |
+| `pydantic-settings` | Configuration centralisée via `.env` |

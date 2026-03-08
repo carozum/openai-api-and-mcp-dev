@@ -3,8 +3,6 @@ import json
 import logging
 import re
 import uuid
-from pathlib import Path
-from typing import Annotated
 
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,6 +15,7 @@ from utils import (
     Message,
     client,
     generate_image,
+    moderate_text,
     speech_to_text,
     speech_to_translation,
     text_to_speech,
@@ -37,6 +36,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 app.mount("/static", StaticFiles(directory="static"), name="static")
+
+# ── Generic moderation error ──────────────────────────────────────────────────
+MODERATION_ERROR = "🚫 Ce contenu ne peut pas être traité."
+
+
+def _check_moderation(text: str) -> None:
+    """
+    Run moderation on `text`. Raises HTTP 422 with a generic message if flagged.
+    Flagged categories are logged server-side only — never exposed to the client.
+    """
+    if not text.strip():
+        return
+    result = moderate_text(text)
+    if result.flagged:
+        logger.warning("Content blocked by moderation: %s", result.flagged_categories)
+        raise HTTPException(status_code=422, detail=MODERATION_ERROR)
 
 
 # ── Pydantic models ───────────────────────────────────────────────────────────
@@ -60,6 +75,10 @@ class TTSRequest(BaseModel):
     speed: float = Field(settings.default_tts_speed, ge=0.5, le=2.0)
 
 
+class ModerateRequest(BaseModel):
+    text: str
+
+
 # ── SSE helper ────────────────────────────────────────────────────────────────
 
 def sse(data: dict) -> str:
@@ -76,6 +95,9 @@ def index() -> FileResponse:
 # TEXT CHAT — streaming SSE
 @app.post("/api/chat/stream")
 async def chat_stream(req: ChatRequest) -> StreamingResponse:
+    last_user = next((m["content"] for m in reversed(req.messages) if m["role"] == "user"), "")
+    _check_moderation(last_user)
+
     full_messages = [{"role": "system", "content": settings.system_message}] + req.messages
 
     def generate():
@@ -101,6 +123,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
 # IMAGE
 @app.post("/api/image")
 def image(req: ImageRequest) -> dict:
+    _check_moderation(req.prompt)
     try:
         image_bytes = generate_image(req.prompt, model=req.model, size=req.size)
         return {"image_b64": base64.b64encode(image_bytes).decode()}
@@ -120,6 +143,7 @@ async def transcribe(
             text = speech_to_text(tmp_path, model=model)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _check_moderation(text)
     return {"text": text}
 
 
@@ -132,12 +156,14 @@ async def translate(audio: UploadFile = File(...)) -> dict:
             text = speech_to_translation(tmp_path)
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
+    _check_moderation(text)
     return {"text": text}
 
 
 # TEXT TO SPEECH
 @app.post("/api/tts")
 def tts(req: TTSRequest) -> FileResponse:
+    _check_moderation(req.text)
     out_path = settings.tmp_dir / f"{uuid.uuid4()}.wav"
     try:
         text_to_speech(req.text, output_path=out_path,
@@ -147,7 +173,7 @@ def tts(req: TTSRequest) -> FileResponse:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
-# VOICE CHAT — streaming SSE (STT → LLM stream → TTS per sentence)
+# VOICE CHAT — streaming SSE (STT → modération → LLM stream → TTS per sentence)
 _SENTENCE_RE = re.compile(r'(?<=[.!?…])\s+')
 
 
@@ -178,7 +204,7 @@ async def voice_chat_stream(
     speed: float = Form(settings.default_tts_speed),
 ) -> StreamingResponse:
 
-    # 1. Transcribe audio before opening the stream
+    # 1. Transcribe
     with tmp_audio_file(".webm") as tmp_path:
         tmp_path.write_bytes(await audio.read())
         try:
@@ -186,6 +212,10 @@ async def voice_chat_stream(
         except Exception as exc:
             raise HTTPException(status_code=500, detail=str(exc)) from exc
 
+    # 2. Moderate transcribed text
+    _check_moderation(user_text)
+
+    # 3. Build conversation
     messages: list[Message] = json.loads(history)
     messages.append({"role": "user", "content": user_text})
     full_messages = [{"role": "system", "content": settings.system_message}] + messages
@@ -212,7 +242,6 @@ async def voice_chat_stream(
                 full_response += token
                 yield sse({"token": token})
 
-                # TTS each complete sentence immediately
                 sentences = _split_sentences(buffer)
                 if len(sentences) > 1:
                     to_speak = " ".join(sentences[:-1])
@@ -220,7 +249,6 @@ async def voice_chat_stream(
                     audio_b64 = _tts_to_b64(to_speak, tts_model, voice, speed)
                     yield sse({"audio": audio_b64})
 
-            # TTS any remaining text
             if buffer.strip():
                 audio_b64 = _tts_to_b64(buffer.strip(), tts_model, voice, speed)
                 yield sse({"audio": audio_b64})
@@ -232,3 +260,14 @@ async def voice_chat_stream(
             yield sse({"error": str(exc)})
 
     return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# MODERATION — standalone endpoint
+@app.post("/api/moderate")
+def moderate(req: ModerateRequest) -> dict:
+    """Returns only flagged status — scores/categories stay server-side."""
+    try:
+        result = moderate_text(req.text)
+        return {"flagged": result.flagged}
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc

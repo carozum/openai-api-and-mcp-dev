@@ -128,6 +128,7 @@
   .status { font-size:.82rem; color:var(--text2); min-height:1.2em; }
   .status.error { color:var(--accent2); }
   .status.ok { color:var(--success); }
+  .status.moderated { color:#ff9800; font-weight:500; }
 </style>
 </head>
 <body>
@@ -284,6 +285,17 @@
 // ═══════════════════════════════════════════
 const $ = id => document.getElementById(id);
 
+// Parse error message from a non-ok Response
+async function parseError(res) {
+  try {
+    const d = await res.json();
+    return typeof d.detail === 'string' ? d.detail : d.detail?.message || res.statusText;
+  } catch {
+    return res.statusText;
+  }
+}
+
+
 $('temperature').addEventListener('input', e => $('temp-val').textContent = (+e.target.value).toFixed(1));
 $('tts-speed').addEventListener('input', e => $('speed-val').textContent = (+e.target.value).toFixed(1));
 
@@ -366,6 +378,13 @@ async function sendChatMessage(text) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ messages: chatHistory, model: s.textModel, temperature: s.temperature }),
     });
+
+    if (!res.ok) {
+      bubble.textContent = await parseError(res);
+      cursor.remove();
+      chatHistory.pop(); // remove the flagged user message from history
+      return;
+    }
 
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
@@ -458,8 +477,8 @@ $('image-gen-btn').addEventListener('click', async () => {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ prompt, model: settings().imageModel }),
     });
+    if (!res.ok) { throw new Error(await parseError(res)); }
     const d = await res.json();
-    if (!res.ok) throw new Error(d.detail);
     $('image-output').innerHTML = `<img src="data:image/png;base64,${d.image_b64}" />`;
     $('image-status').textContent = '';
   } catch(e) { $('image-status').textContent = '❌ ' + e.message; $('image-status').className = 'status error'; }
@@ -474,16 +493,16 @@ async function transcribeBlob(blob, model) {
   fd.append('audio', blob, 'audio.webm');
   fd.append('model', model);
   const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
+  if (!r.ok) throw new Error(await parseError(r));
   const d = await r.json();
-  if (!r.ok) throw new Error(d.detail);
   return d.text;
 }
 async function translateBlob(blob) {
   const fd = new FormData();
   fd.append('audio', blob, 'audio.webm');
   const r = await fetch('/api/translate', { method: 'POST', body: fd });
+  if (!r.ok) throw new Error(await parseError(r));
   const d = await r.json();
-  if (!r.ok) throw new Error(d.detail);
   return d.text;
 }
 function setupAudioTab(micId, sendId, statusId, resultId, action) {
@@ -522,7 +541,7 @@ $('tts-btn').addEventListener('click', async () => {
   $('tts-btn').disabled = true; $('tts-status').innerHTML = '<span class="spinner"></span>'; $('tts-output').innerHTML = '';
   try {
     const res = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, model: s.ttsModel, voice: s.ttsVoice, speed: s.ttsSpeed }) });
-    if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+    if (!res.ok) { throw new Error(await parseError(res)); }
     const url = URL.createObjectURL(await res.blob());
     $('tts-output').innerHTML = `<audio controls src="${url}"></audio>`;
     $('tts-status').textContent = '';
@@ -610,6 +629,14 @@ const voiceRecorder = makeRecorder(async blob => {
 
   try {
     const res = await fetch('/api/voice-chat/stream', { method: 'POST', body: fd, signal: streamAbort.signal });
+
+    if (!res.ok) {
+      const msg = await parseError(res);
+      setVoiceStatus(msg, '');
+      $('voice-mic-btn').disabled = false;
+      return;
+    }
+
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '';

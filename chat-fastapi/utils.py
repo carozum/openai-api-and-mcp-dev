@@ -167,3 +167,44 @@ def text_to_speech(
         response.stream_to_file(output_path)
     logger.debug("TTS saved to %s", output_path)
     return output_path
+
+
+# ── Moderation ────────────────────────────────────────────────────────────────
+
+class ModerationResult:
+    """Wraps an OpenAI moderation result with convenience helpers."""
+
+    def __init__(self, flagged: bool, categories: dict[str, bool], scores: dict[str, float]):
+        self.flagged = flagged
+        self.categories = categories
+        self.scores = scores
+
+    @property
+    def flagged_categories(self) -> list[str]:
+        """Return names of categories that were flagged."""
+        return [k for k, v in self.categories.items() if v]
+
+    def __repr__(self) -> str:
+        if not self.flagged:
+            return "ModerationResult(ok)"
+        return f"ModerationResult(flagged={self.flagged_categories})"
+
+
+def moderate_text(text: str) -> ModerationResult:
+    """
+    Run OpenAI moderation on a text string.
+    Returns a ModerationResult; does NOT raise — let the caller decide.
+    """
+    result = client.moderations.create(
+        model="omni-moderation-latest",
+        input=text,
+    )
+    r = result.results[0]
+    mod = ModerationResult(
+        flagged=bool(r.flagged),
+        categories=dict(r.categories),
+        scores=dict(r.category_scores),
+    )
+    if mod.flagged:
+        logger.warning("Content flagged by moderation: %s", mod.flagged_categories)
+    return mod
