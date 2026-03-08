@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Chatbot App</title>
+<link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600&family=DM+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  :root {
+    --bg: #0f0f11;
+    --surface: #18181c;
+    --surface2: #222228;
+    --border: #2e2e38;
+    --accent: #7c6dfa;
+    --accent2: #fa6d8f;
+    --text: #e8e8f0;
+    --text2: #8888a0;
+    --success: #4caf7d;
+    --radius: 12px;
+    --font: 'DM Sans', sans-serif;
+    --mono: 'DM Mono', monospace;
+  }
+
+  body { font-family: var(--font); background: var(--bg); color: var(--text); min-height: 100vh; display: flex; flex-direction: column; }
+
+  header {
+    padding: 16px 32px;
+    border-bottom: 1px solid var(--border);
+    display: flex; align-items: center; justify-content: space-between;
+    background: var(--surface); flex-wrap: wrap; gap: 12px;
+  }
+  header h1 { font-size: 1.2rem; font-weight: 600; letter-spacing: -0.02em; }
+  header h1 span { color: var(--accent); }
+
+  .settings-bar { display: flex; gap: 12px; align-items: flex-end; flex-wrap: wrap; }
+  .setting { display: flex; flex-direction: column; gap: 3px; }
+  .setting label { font-size: 0.68rem; color: var(--text2); text-transform: uppercase; letter-spacing: 0.06em; }
+  .setting select, .setting input[type=range] {
+    background: var(--surface2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 4px 8px; font-family: var(--mono); font-size: 0.78rem; cursor: pointer;
+  }
+  .val { font-family: var(--mono); font-size: 0.78rem; color: var(--accent); }
+
+  .tabs { display: flex; padding: 0 32px; border-bottom: 1px solid var(--border); background: var(--surface); }
+  .tab-btn {
+    padding: 14px 20px; background: none; border: none; border-bottom: 2px solid transparent;
+    color: var(--text2); font-family: var(--font); font-size: 0.9rem; font-weight: 500;
+    cursor: pointer; transition: color .2s, border-color .2s; white-space: nowrap;
+  }
+  .tab-btn:hover { color: var(--text); }
+  .tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+
+  main { flex: 1; display: flex; flex-direction: column; max-width: 860px; width: 100%; margin: 0 auto; padding: 24px 32px; }
+
+  .tab-panel { display: none; flex: 1; flex-direction: column; }
+  .tab-panel.active { display: flex; }
+
+  /* Chat */
+  .chat-messages {
+    flex: 1; overflow-y: auto; display: flex; flex-direction: column;
+    gap: 16px; padding-bottom: 16px; min-height: 300px; max-height: 58vh;
+  }
+  .message { display: flex; gap: 12px; animation: fadeUp .25s ease; }
+  @keyframes fadeUp { from { opacity:0; transform:translateY(8px); } to { opacity:1; transform:translateY(0); } }
+  .message.user { flex-direction: row-reverse; }
+  .avatar { width:32px; height:32px; border-radius:50%; display:flex; align-items:center; justify-content:center; font-size:.85rem; flex-shrink:0; }
+  .message.user .avatar { background: var(--accent); }
+  .message.assistant .avatar { background: var(--accent2); }
+  .bubble { max-width:75%; padding:12px 16px; border-radius:var(--radius); font-size:.92rem; line-height:1.6; white-space:pre-wrap; }
+  .message.user .bubble { background:var(--accent); color:#fff; border-bottom-right-radius:4px; }
+  .message.assistant .bubble { background:var(--surface2); border:1px solid var(--border); border-bottom-left-radius:4px; }
+  .cursor { display:inline-block; width:2px; height:1em; background:var(--accent2); margin-left:2px; animation:blink .7s step-end infinite; vertical-align:text-bottom; }
+  @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0} }
+
+  .chat-input-area { margin-top:16px; display:flex; flex-direction:column; gap:10px; border-top:1px solid var(--border); padding-top:16px; }
+  .input-row { display:flex; gap:10px; align-items:center; }
+  .chat-input-area textarea {
+    flex:1; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius);
+    color:var(--text); font-family:var(--font); font-size:.92rem; padding:12px 16px;
+    resize:none; min-height:48px; max-height:140px; outline:none; transition:border-color .2s;
+  }
+  .chat-input-area textarea:focus { border-color: var(--accent); }
+
+  /* Buttons */
+  .btn { padding:10px 20px; border:none; border-radius:var(--radius); font-family:var(--font); font-size:.88rem; font-weight:500; cursor:pointer; transition:opacity .2s, transform .1s; }
+  .btn:active { transform:scale(.97); }
+  .btn:disabled { opacity:.4; cursor:not-allowed; }
+  .btn-primary { background:var(--accent); color:#fff; }
+  .btn-secondary { background:var(--surface2); color:var(--text); border:1px solid var(--border); }
+  .btn-danger { background:transparent; color:var(--accent2); border:1px solid var(--accent2); font-size:.8rem; padding:6px 14px; }
+  .btn-icon { width:44px; height:44px; padding:0; display:flex; align-items:center; justify-content:center; font-size:1.1rem; background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); color:var(--text); flex-shrink:0; cursor:pointer; }
+  .btn-icon.recording { background:var(--accent2); border-color:var(--accent2); color:#fff; animation:pulse 1s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.6} }
+
+  /* Image */
+  .image-output { margin-top:20px; text-align:center; }
+  .image-output img { max-width:100%; border-radius:var(--radius); border:1px solid var(--border); }
+
+  /* Audio tab */
+  .audio-section { margin-bottom:32px; }
+  .audio-section h3 { font-size:.95rem; font-weight:600; margin-bottom:4px; }
+  .audio-section p { font-size:.82rem; color:var(--text2); margin-bottom:14px; }
+  .result-box { background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:14px 16px; font-size:.9rem; line-height:1.6; min-height:48px; color:var(--text); margin-top:12px; }
+  .divider { border:none; border-top:1px solid var(--border); margin:24px 0; }
+  audio { width:100%; margin-top:12px; border-radius:8px; }
+
+  /* Voice chat */
+  .voice-chat-wrap { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:24px; text-align:center; }
+  .voice-status { font-size:.9rem; color:var(--text2); min-height:1.4em; font-family:var(--mono); }
+  .voice-status.active { color:var(--accent); }
+  .voice-status.speaking { color:var(--success); }
+  .mic-btn { width:80px; height:80px; border-radius:50%; background:var(--surface2); border:2px solid var(--border); font-size:2rem; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .2s, border-color .2s, transform .1s; }
+  .mic-btn:hover { border-color:var(--accent); }
+  .mic-btn.recording { background:var(--accent2); border-color:var(--accent2); animation:pulse 1s infinite; }
+  .mic-btn:disabled { opacity:.4; cursor:not-allowed; animation:none; }
+  .pause-btn { width:48px; height:48px; border-radius:50%; background:var(--surface2); border:1px solid var(--border); font-size:1.3rem; display:flex; align-items:center; justify-content:center; cursor:pointer; transition:background .2s; }
+  .pause-btn:hover { background:var(--surface); border-color:var(--accent2); }
+  .voice-transcript { max-width:480px; font-size:.85rem; color:var(--text2); font-style:italic; min-height:1.2em; }
+  .voice-response { max-width:480px; font-size:.9rem; line-height:1.6; white-space:pre-wrap; color:var(--text); background:var(--surface2); border:1px solid var(--border); border-radius:var(--radius); padding:12px 16px; display:none; text-align:left; }
+  .voice-hint { font-size:.8rem; color:var(--text2); }
+  .voice-turn-count { font-family:var(--mono); font-size:.75rem; color:var(--text2); }
+
+  /* Misc */
+  .spinner { display:inline-block; width:14px; height:14px; border:2px solid var(--border); border-top-color:var(--accent); border-radius:50%; animation:spin .7s linear infinite; vertical-align:middle; margin-right:6px; }
+  @keyframes spin { to { transform:rotate(360deg); } }
+  .status { font-size:.82rem; color:var(--text2); min-height:1.2em; }
+  .status.error { color:var(--accent2); }
+  .status.ok { color:var(--success); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>Chat<span>bot</span> App</h1>
+  <div class="settings-bar">
+    <div class="setting">
+      <label>Text model</label>
+      <select id="text-model">
+        <option value="gpt-4o-mini">GPT-4o Mini</option>
+        <option value="gpt-4o">GPT-4o</option>
+        <option value="gpt-3.5-turbo">GPT-3.5 Turbo</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>Temp <span class="val" id="temp-val">0.7</span></label>
+      <input type="range" id="temperature" min="0" max="1.5" step="0.1" value="0.7" style="width:72px" />
+    </div>
+    <div class="setting">
+      <label>Image model</label>
+      <select id="image-model">
+        <option value="gpt-image-1">GPT Image 1</option>
+        <option value="gpt-image-1-mini">GPT Image 1 Mini</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>STT</label>
+      <select id="stt-model">
+        <option value="gpt-4o-transcribe">GPT-4o Transcribe</option>
+        <option value="whisper-1">Whisper-1</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>Voice</label>
+      <select id="tts-voice">
+        <option value="alloy">Alloy</option>
+        <option value="echo">Echo</option>
+        <option value="fable">Fable</option>
+        <option value="onyx">Onyx</option>
+        <option value="nova">Nova</option>
+        <option value="shimmer">Shimmer</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>TTS</label>
+      <select id="tts-model">
+        <option value="tts-1">TTS-1</option>
+        <option value="tts-1-hd">TTS-1 HD</option>
+      </select>
+    </div>
+    <div class="setting">
+      <label>Speed <span class="val" id="speed-val">1.0</span></label>
+      <input type="range" id="tts-speed" min="0.5" max="2.0" step="0.1" value="1.0" style="width:60px" />
+    </div>
+  </div>
+</header>
+
+<div class="tabs">
+  <button class="tab-btn active" data-tab="chat">💬 Text Chat</button>
+  <button class="tab-btn" data-tab="image">🖼️ Image</button>
+  <button class="tab-btn" data-tab="audio">🎙️ Audio</button>
+  <button class="tab-btn" data-tab="voice">🤖 Voice Chat</button>
+</div>
+
+<main>
+
+  <!-- TEXT CHAT -->
+  <div class="tab-panel active" id="tab-chat">
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-input-area">
+      <div class="input-row">
+        <button class="btn-icon" id="chat-mic-btn" title="Enregistrer">🎤</button>
+        <span class="status" id="chat-mic-status"></span>
+        <button class="btn btn-danger" id="chat-clear-btn" style="margin-left:auto">🗑️ Effacer</button>
+      </div>
+      <div class="input-row">
+        <textarea id="chat-textarea" placeholder="Écris ton message... (Enter pour envoyer, Shift+Enter pour nouvelle ligne)" rows="1"></textarea>
+        <button class="btn btn-primary" id="chat-send-btn">Envoyer</button>
+      </div>
+      <div class="status" id="chat-status"></div>
+    </div>
+  </div>
+
+  <!-- IMAGE -->
+  <div class="tab-panel" id="tab-image">
+    <div class="input-row" style="gap:10px;margin-bottom:8px">
+      <textarea id="image-prompt" placeholder="Décris une image à générer..." rows="2"
+        style="flex:1;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--font);font-size:.92rem;padding:12px 16px;resize:none;outline:none"></textarea>
+      <button class="btn btn-primary" id="image-gen-btn">Générer</button>
+    </div>
+    <div class="status" id="image-status"></div>
+    <div class="image-output" id="image-output"></div>
+  </div>
+
+  <!-- AUDIO -->
+  <div class="tab-panel" id="tab-audio">
+    <div class="audio-section">
+      <h3>📝 Speech → Text</h3>
+      <p>Transcrit ta voix dans sa langue d'origine.</p>
+      <div class="input-row" style="gap:10px">
+        <button class="btn-icon" id="stt-mic-btn">🎤</button>
+        <button class="btn btn-primary" id="stt-send-btn" disabled>Transcrire</button>
+        <span class="status" id="stt-status"></span>
+      </div>
+      <div class="result-box" id="stt-result" style="display:none"></div>
+    </div>
+    <hr class="divider" />
+    <div class="audio-section">
+      <h3>🌐 Speech → Translation</h3>
+      <p>Traduit ta voix en anglais.</p>
+      <div class="input-row" style="gap:10px">
+        <button class="btn-icon" id="trl-mic-btn">🎤</button>
+        <button class="btn btn-primary" id="trl-send-btn" disabled>Traduire</button>
+        <span class="status" id="trl-status"></span>
+      </div>
+      <div class="result-box" id="trl-result" style="display:none"></div>
+    </div>
+    <hr class="divider" />
+    <div class="audio-section">
+      <h3>🔊 Text → Speech</h3>
+      <p>Synthétise un texte avec la voix choisie.</p>
+      <textarea id="tts-input" placeholder="Écris quelque chose à entendre..." rows="3"
+        style="width:100%;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius);color:var(--text);font-family:var(--font);font-size:.92rem;padding:12px 16px;resize:vertical;outline:none;margin-bottom:10px"></textarea>
+      <div style="display:flex;gap:10px;align-items:center">
+        <button class="btn btn-primary" id="tts-btn">🎧 Générer l'audio</button>
+        <span class="status" id="tts-status"></span>
+      </div>
+      <div id="tts-output"></div>
+    </div>
+  </div>
+
+  <!-- VOICE CHAT -->
+  <div class="tab-panel" id="tab-voice">
+    <div class="voice-chat-wrap">
+      <div class="voice-turn-count" id="voice-turn-count">0 échange</div>
+      <div class="voice-transcript" id="voice-transcript"></div>
+      <button class="mic-btn" id="voice-mic-btn">🎤</button>
+      <div style="display:flex;gap:16px;align-items:center">
+        <button class="pause-btn" id="voice-pause-btn" style="display:none" title="Pause / Reprendre">⏸️</button>
+      </div>
+      <div class="voice-status" id="voice-status">Appuie pour parler</div>
+      <div class="voice-response" id="voice-response"></div>
+      <div class="voice-hint">La réponse est lue automatiquement phrase par phrase</div>
+      <button class="btn btn-danger" id="voice-clear-btn" style="display:none">🗑️ Réinitialiser</button>
+    </div>
+  </div>
+
+</main>
+
+<script>
+// ═══════════════════════════════════════════
+// UTILS
+// ═══════════════════════════════════════════
+const $ = id => document.getElementById(id);
+
+$('temperature').addEventListener('input', e => $('temp-val').textContent = (+e.target.value).toFixed(1));
+$('tts-speed').addEventListener('input', e => $('speed-val').textContent = (+e.target.value).toFixed(1));
+
+const settings = () => ({
+  textModel:   $('text-model').value,
+  temperature: parseFloat($('temperature').value),
+  imageModel:  $('image-model').value,
+  sttModel:    $('stt-model').value,
+  ttsVoice:    $('tts-voice').value,
+  ttsModel:    $('tts-model').value,
+  ttsSpeed:    parseFloat($('tts-speed').value),
+});
+
+// Tabs
+document.querySelectorAll('.tab-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+    document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+    btn.classList.add('active');
+    $('tab-' + btn.dataset.tab).classList.add('active');
+  });
+});
+
+// MediaRecorder helper
+function makeRecorder(onStop) {
+  let mr, chunks = [];
+  return {
+    async start() {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mr = new MediaRecorder(stream);
+      chunks = [];
+      mr.ondataavailable = e => chunks.push(e.data);
+      mr.onstop = () => { stream.getTracks().forEach(t => t.stop()); onStop(new Blob(chunks, { type: 'audio/webm' })); };
+      mr.start();
+    },
+    stop() { if (mr?.state === 'recording') mr.stop(); },
+    isRecording() { return mr?.state === 'recording'; }
+  };
+}
+
+// ═══════════════════════════════════════════
+// TEXT CHAT — streaming
+// ═══════════════════════════════════════════
+let chatHistory = [];
+
+function appendMessage(role, content = '') {
+  const wrap = $('chat-messages');
+  const div = document.createElement('div');
+  div.className = `message ${role}`;
+  div.innerHTML = `
+    <div class="avatar">${role === 'user' ? '👤' : '🤖'}</div>
+    <div class="bubble"></div>`;
+  wrap.appendChild(div);
+  wrap.scrollTop = wrap.scrollHeight;
+  const bubble = div.querySelector('.bubble');
+  if (content) bubble.textContent = content;
+  return bubble;
+}
+
+async function sendChatMessage(text) {
+  if (!text.trim()) return;
+  const s = settings();
+  appendMessage('user', text);
+  chatHistory.push({ role: 'user', content: text });
+
+  $('chat-send-btn').disabled = true;
+  $('chat-status').innerHTML = '<span class="spinner"></span>';
+
+  // Create assistant bubble with cursor
+  const bubble = appendMessage('assistant');
+  const cursor = document.createElement('span');
+  cursor.className = 'cursor';
+  bubble.appendChild(cursor);
+
+  let fullText = '';
+
+  try {
+    const res = await fetch('/api/chat/stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory, model: s.textModel, temperature: s.temperature }),
+    });
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const evt = JSON.parse(line.slice(6));
+        if (evt.token) {
+          fullText += evt.token;
+          bubble.textContent = fullText;
+          bubble.appendChild(cursor);
+          $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+        }
+        if (evt.done) { cursor.remove(); }
+        if (evt.error) { bubble.textContent = '❌ ' + evt.error; cursor.remove(); }
+      }
+    }
+  } catch(e) {
+    bubble.textContent = '❌ ' + e.message;
+    cursor.remove();
+  } finally {
+    $('chat-send-btn').disabled = false;
+    $('chat-status').textContent = '';
+    chatHistory.push({ role: 'assistant', content: fullText });
+  }
+}
+
+$('chat-textarea').addEventListener('keydown', e => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    const val = $('chat-textarea').value;
+    $('chat-textarea').value = '';
+    sendChatMessage(val);
+  }
+});
+$('chat-send-btn').addEventListener('click', () => {
+  const val = $('chat-textarea').value;
+  $('chat-textarea').value = '';
+  sendChatMessage(val);
+});
+$('chat-clear-btn').addEventListener('click', () => { chatHistory = []; $('chat-messages').innerHTML = ''; });
+
+// Mic → transcribe → fill textarea
+const chatRecorder = makeRecorder(blob => {
+  const fd = new FormData();
+  fd.append('audio', blob, 'audio.webm');
+  fd.append('model', $('stt-model').value);
+  $('chat-mic-status').innerHTML = '<span class="spinner"></span>';
+  fetch('/api/transcribe', { method: 'POST', body: fd })
+    .then(r => r.json())
+    .then(d => {
+      $('chat-textarea').value = d.text;
+      $('chat-mic-status').textContent = '✅ Transcrit';
+      $('chat-mic-status').className = 'status ok';
+    })
+    .catch(e => { $('chat-mic-status').textContent = '❌ ' + e.message; $('chat-mic-status').className = 'status error'; });
+});
+$('chat-mic-btn').addEventListener('click', () => {
+  if (chatRecorder.isRecording()) {
+    chatRecorder.stop();
+    $('chat-mic-btn').classList.remove('recording');
+    $('chat-mic-btn').textContent = '🎤';
+  } else {
+    chatRecorder.start();
+    $('chat-mic-btn').classList.add('recording');
+    $('chat-mic-btn').textContent = '⏹️';
+    $('chat-mic-status').textContent = '🔴 Enregistrement...';
+    $('chat-mic-status').className = 'status active';
+  }
+});
+
+// ═══════════════════════════════════════════
+// IMAGE
+// ═══════════════════════════════════════════
+$('image-gen-btn').addEventListener('click', async () => {
+  const prompt = $('image-prompt').value.trim();
+  if (!prompt) return;
+  $('image-gen-btn').disabled = true;
+  $('image-status').innerHTML = '<span class="spinner"></span>Génération...';
+  $('image-output').innerHTML = '';
+  try {
+    const res = await fetch('/api/image', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ prompt, model: settings().imageModel }),
+    });
+    const d = await res.json();
+    if (!res.ok) throw new Error(d.detail);
+    $('image-output').innerHTML = `<img src="data:image/png;base64,${d.image_b64}" />`;
+    $('image-status').textContent = '';
+  } catch(e) { $('image-status').textContent = '❌ ' + e.message; $('image-status').className = 'status error'; }
+  finally { $('image-gen-btn').disabled = false; }
+});
+
+// ═══════════════════════════════════════════
+// AUDIO HELPERS
+// ═══════════════════════════════════════════
+async function transcribeBlob(blob, model) {
+  const fd = new FormData();
+  fd.append('audio', blob, 'audio.webm');
+  fd.append('model', model);
+  const r = await fetch('/api/transcribe', { method: 'POST', body: fd });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail);
+  return d.text;
+}
+async function translateBlob(blob) {
+  const fd = new FormData();
+  fd.append('audio', blob, 'audio.webm');
+  const r = await fetch('/api/translate', { method: 'POST', body: fd });
+  const d = await r.json();
+  if (!r.ok) throw new Error(d.detail);
+  return d.text;
+}
+function setupAudioTab(micId, sendId, statusId, resultId, action) {
+  let blob = null;
+  const rec = makeRecorder(b => {
+    blob = b;
+    $(sendId).disabled = false;
+    $(statusId).textContent = '✅ Prêt'; $(statusId).className = 'status ok';
+  });
+  $(micId).addEventListener('click', () => {
+    if (rec.isRecording()) {
+      rec.stop(); $(micId).classList.remove('recording'); $(micId).textContent = '🎤';
+    } else {
+      blob = null; $(sendId).disabled = true; rec.start();
+      $(micId).classList.add('recording'); $(micId).textContent = '⏹️';
+      $(statusId).textContent = '🔴 Enregistrement...'; $(statusId).className = 'status active';
+    }
+  });
+  $(sendId).addEventListener('click', async () => {
+    if (!blob) return;
+    $(sendId).disabled = true;
+    $(statusId).innerHTML = '<span class="spinner"></span>';
+    try {
+      const text = await action(blob);
+      $(resultId).textContent = text; $(resultId).style.display = 'block'; $(statusId).textContent = '';
+    } catch(e) { $(statusId).textContent = '❌ ' + e.message; $(statusId).className = 'status error'; }
+    finally { $(sendId).disabled = false; }
+  });
+}
+setupAudioTab('stt-mic-btn','stt-send-btn','stt-status','stt-result', b => transcribeBlob(b, $('stt-model').value));
+setupAudioTab('trl-mic-btn','trl-send-btn','trl-status','trl-result', b => translateBlob(b));
+
+$('tts-btn').addEventListener('click', async () => {
+  const text = $('tts-input').value.trim(); if (!text) return;
+  const s = settings();
+  $('tts-btn').disabled = true; $('tts-status').innerHTML = '<span class="spinner"></span>'; $('tts-output').innerHTML = '';
+  try {
+    const res = await fetch('/api/tts', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({ text, model: s.ttsModel, voice: s.ttsVoice, speed: s.ttsSpeed }) });
+    if (!res.ok) { const d = await res.json(); throw new Error(d.detail); }
+    const url = URL.createObjectURL(await res.blob());
+    $('tts-output').innerHTML = `<audio controls src="${url}"></audio>`;
+    $('tts-status').textContent = '';
+  } catch(e) { $('tts-status').textContent = '❌ ' + e.message; }
+  finally { $('tts-btn').disabled = false; }
+});
+
+// ═══════════════════════════════════════════
+// VOICE CHAT — streaming + pause
+// ═══════════════════════════════════════════
+let voiceHistory = [];
+let currentAudio = null;   // currently playing Audio object
+let audioQueue = [];       // queue of base64 audio chunks waiting to play
+let isPlaying = false;
+let isPaused = false;
+let streamAbort = null;    // AbortController for the stream
+
+function setVoiceStatus(text, cls = '') {
+  $('voice-status').textContent = text;
+  $('voice-status').className = 'voice-status' + (cls ? ' ' + cls : '');
+}
+
+// Play next audio chunk from queue
+function playNext() {
+  if (isPaused || audioQueue.length === 0) { isPlaying = false; return; }
+  isPlaying = true;
+  const b64 = audioQueue.shift();
+  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  const url = URL.createObjectURL(new Blob([bytes], { type: 'audio/wav' }));
+  currentAudio = new Audio(url);
+  setVoiceStatus('🔊 Lecture...', 'speaking');
+  currentAudio.play();
+  currentAudio.onended = () => { URL.revokeObjectURL(url); playNext(); };
+  currentAudio.onerror = () => { URL.revokeObjectURL(url); playNext(); };
+}
+
+function pauseVoice() {
+  isPaused = true;
+  if (currentAudio) { currentAudio.pause(); }
+  $('voice-pause-btn').textContent = '▶️';
+  setVoiceStatus('En pause', '');
+}
+
+function resumeVoice() {
+  isPaused = false;
+  $('voice-pause-btn').textContent = '⏸️';
+  if (currentAudio && currentAudio.paused) {
+    currentAudio.play();
+    setVoiceStatus('🔊 Lecture...', 'speaking');
+  } else {
+    playNext();
+  }
+}
+
+function stopVoice() {
+  isPaused = false; isPlaying = false; audioQueue = [];
+  if (currentAudio) { currentAudio.pause(); currentAudio = null; }
+  if (streamAbort) { streamAbort.abort(); streamAbort = null; }
+  $('voice-pause-btn').style.display = 'none';
+}
+
+$('voice-pause-btn').addEventListener('click', () => {
+  if (isPaused) resumeVoice(); else pauseVoice();
+});
+
+const voiceRecorder = makeRecorder(async blob => {
+  const s = settings();
+  setVoiceStatus('⏳ Traitement...', 'active');
+  $('voice-mic-btn').disabled = true;
+  $('voice-response').style.display = 'none';
+  $('voice-response').textContent = '';
+  stopVoice();
+
+  streamAbort = new AbortController();
+
+  const fd = new FormData();
+  fd.append('audio', blob, 'audio.webm');
+  fd.append('history', JSON.stringify(voiceHistory));
+  fd.append('text_model', s.textModel);
+  fd.append('temperature', s.temperature);
+  fd.append('stt_model', s.sttModel);
+  fd.append('tts_model', s.ttsModel);
+  fd.append('voice', s.ttsVoice);
+  fd.append('speed', s.ttsSpeed);
+
+  try {
+    const res = await fetch('/api/voice-chat/stream', { method: 'POST', body: fd, signal: streamAbort.signal });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buf = '';
+    let responseText = '';
+    let userText = '';
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += decoder.decode(value, { stream: true });
+      const lines = buf.split('\n');
+      buf = lines.pop();
+
+      for (const line of lines) {
+        if (!line.startsWith('data: ')) continue;
+        const evt = JSON.parse(line.slice(6));
+
+        if (evt.user_text) {
+          userText = evt.user_text;
+          $('voice-transcript').textContent = '🗣️ ' + userText;
+        }
+        if (evt.token) {
+          responseText += evt.token;
+          $('voice-response').textContent = responseText;
+          $('voice-response').style.display = 'block';
+        }
+        if (evt.audio) {
+          audioQueue.push(evt.audio);
+          if (!isPlaying && !isPaused) playNext();
+          $('voice-pause-btn').style.display = 'flex';
+        }
+        if (evt.done) {
+          voiceHistory.push({ role: 'user', content: userText });
+          voiceHistory.push({ role: 'assistant', content: evt.full_response });
+          const n = voiceHistory.length / 2;
+          $('voice-turn-count').textContent = `${n} échange${n > 1 ? 's' : ''}`;
+          $('voice-clear-btn').style.display = 'inline-block';
+          // Wait for queue to finish then reset
+          const checkDone = setInterval(() => {
+            if (!isPlaying && audioQueue.length === 0) {
+              clearInterval(checkDone);
+              setVoiceStatus('Appuie pour parler', '');
+              $('voice-pause-btn').style.display = 'none';
+            }
+          }, 300);
+        }
+        if (evt.error) {
+          setVoiceStatus('❌ ' + evt.error, '');
+        }
+      }
+    }
+  } catch(e) {
+    if (e.name !== 'AbortError') setVoiceStatus('❌ ' + e.message, '');
+  } finally {
+    $('voice-mic-btn').disabled = false;
+  }
+});
+
+$('voice-mic-btn').addEventListener('click', () => {
+  if (voiceRecorder.isRecording()) {
+    voiceRecorder.stop();
+    $('voice-mic-btn').classList.remove('recording');
+    $('voice-mic-btn').textContent = '🎤';
+    setVoiceStatus('⏳ Envoi...', 'active');
+  } else {
+    stopVoice();
+    voiceRecorder.start();
+    $('voice-mic-btn').classList.add('recording');
+    $('voice-mic-btn').textContent = '⏹️';
+    $('voice-transcript').textContent = '';
+    setVoiceStatus('🔴 Enregistrement...', 'active');
+  }
+});
+
+$('voice-clear-btn').addEventListener('click', () => {
+  stopVoice();
+  voiceHistory = [];
+  $('voice-turn-count').textContent = '0 échange';
+  $('voice-clear-btn').style.display = 'none';
+  $('voice-transcript').textContent = '';
+  $('voice-response').style.display = 'none';
+  setVoiceStatus('Appuie pour parler', '');
+});
+</script>
+</body>
+</html>

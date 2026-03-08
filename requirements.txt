@@ -1,0 +1,11 @@
+openai
+python_dotenv
+colorama
+rich
+streamlit
+watchdog
+pydub
+fastapi
+uvicorn
+python-multipart
+pydantic-settings
