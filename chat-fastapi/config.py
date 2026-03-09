@@ -24,8 +24,12 @@ class Settings(BaseSettings):
     default_tts_voice: str = "alloy"
     default_tts_speed: float = 1.0
 
+    # Weather
+    weather_api_key: str = ""
+
     # Storage
     tmp_dir: Path = Path("temporary_files")
+    files_dir: Path = Path("generated_files")
 
     class Config:
         env_file = "../.env"
@@ -33,3 +37,4 @@ class Settings(BaseSettings):
 
 settings = Settings()
 settings.tmp_dir.mkdir(exist_ok=True)
+settings.files_dir.mkdir(exist_ok=True)

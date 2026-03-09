@@ -129,6 +129,25 @@
   .status.error { color:var(--accent2); }
   .status.ok { color:var(--success); }
   .status.moderated { color:#ff9800; font-weight:500; }
+
+  /* ── Tool call indicator ── */
+  .tool-indicator {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: .78rem; color: var(--text2); font-family: var(--mono);
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: 6px; padding: 4px 10px; margin-bottom: 6px;
+  }
+  /* ── File download button ── */
+  .file-download {
+    display: inline-flex; align-items: center; gap: 8px;
+    background: var(--surface); border: 1px solid var(--accent);
+    color: var(--accent); border-radius: var(--radius);
+    padding: 8px 14px; font-size: .85rem; font-weight: 500;
+    text-decoration: none; margin-top: 8px; cursor: pointer;
+    transition: background .2s;
+  }
+  .file-download:hover { background: var(--accent); color: #fff; }
+
   /* ── File attachment ── */
   .file-preview {
     display: flex; align-items: center; gap: 10px;
@@ -423,11 +442,30 @@ $('chat-file-input').addEventListener('change', e => {
   e.target.value = ''; // allow re-selecting the same file
 });
 
-// Stream helper shared by text-only and file paths
-async function streamSSEInto(res, bubble, cursor, onDone) {
+// Tool name → emoji label
+const TOOL_LABELS = {
+  get_current_weather: '🌤️ Météo en cours...',
+  get_datetime:        '🕐 Heure en cours...',
+  get_weather_forecast: '📅 Prévisions en cours...',
+  generate_file:       '📄 Génération du fichier...',
+};
+
+// Stream helper — handles text tokens, tool indicators, and file downloads
+async function streamSSEInto(res, bubble, cursor) {
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buf = '', fullText = '';
+
+  // Containers inside the bubble
+  const toolWrap = document.createElement('div');  // tool indicators stacked here
+  const textNode = document.createElement('span'); // streaming text here
+  const filesWrap = document.createElement('div'); // file download buttons here
+  bubble.innerHTML = '';
+  bubble.appendChild(toolWrap);
+  bubble.appendChild(textNode);
+  bubble.appendChild(filesWrap);
+  bubble.appendChild(cursor);
+
   while (true) {
     const { done, value } = await reader.read();
     if (done) break;
@@ -437,14 +475,35 @@ async function streamSSEInto(res, bubble, cursor, onDone) {
     for (const line of lines) {
       if (!line.startsWith('data: ')) continue;
       const evt = JSON.parse(line.slice(6));
+
+      if (evt.tool_call) {
+        const label = TOOL_LABELS[evt.tool_call] || `⚙️ ${evt.tool_call}...`;
+        const ind = document.createElement('div');
+        ind.className = 'tool-indicator';
+        ind.innerHTML = `<span class="spinner"></span>${label}`;
+        toolWrap.appendChild(ind);
+        // Remove spinner once the tool result arrives (next iteration will have text/file)
+        setTimeout(() => { ind.querySelector('.spinner')?.remove(); }, 500);
+      }
+
       if (evt.token) {
         fullText += evt.token;
-        bubble.textContent = fullText;
-        bubble.appendChild(cursor);
+        textNode.textContent = fullText;
         $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
       }
-      if (evt.done) { cursor.remove(); if (onDone) onDone(fullText); }
-      if (evt.error) { bubble.textContent = '❌ ' + evt.error; cursor.remove(); }
+
+      if (evt.file) {
+        const btn = document.createElement('a');
+        btn.className = 'file-download';
+        btn.href = evt.file.url;
+        btn.download = evt.file.filename;
+        btn.innerHTML = `📥 <strong>${evt.file.filename}</strong> — ${evt.file.description}`;
+        filesWrap.appendChild(btn);
+        $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+      }
+
+      if (evt.done) { cursor.remove(); }
+      if (evt.error) { textNode.textContent = '❌ ' + evt.error; cursor.remove(); }
     }
   }
   return fullText;

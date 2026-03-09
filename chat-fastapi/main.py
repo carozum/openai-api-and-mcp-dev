@@ -1,19 +1,19 @@
-# uvicorn main:app --reload 2>&1 | tee app.log
-
 import base64
 import json
 import logging
 import re
 import uuid
+from pathlib import Path
 
 from typing import Optional
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from config import settings
+from tools import TOOL_DEFINITIONS, execute_tool
 from utils import (
     Message,
     SUPPORTED_UPLOAD_TYPES,
@@ -97,27 +97,101 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
-# TEXT CHAT — streaming SSE
+# TEXT CHAT — streaming SSE with tool calling
 @app.post("/api/chat/stream")
-async def chat_stream(req: ChatRequest) -> StreamingResponse:
+async def chat_stream(req: ChatRequest, request: Request) -> StreamingResponse:
     last_user = next((m["content"] for m in reversed(req.messages) if m["role"] == "user"), "")
     _check_moderation(last_user)
 
     full_messages = [{"role": "system", "content": settings.system_message}] + req.messages
+    base_url = str(request.base_url).rstrip("/")  # e.g. "http://127.0.0.1:8000"
 
     def generate():
         try:
-            stream = client.chat.completions.create(
-                model=req.model,
-                messages=full_messages,
-                temperature=req.temperature,
-                stream=True,
-            )
-            for chunk in stream:
-                token = chunk.choices[0].delta.content or ""
-                if token:
-                    yield sse({"token": token})
-            yield sse({"done": True})
+            messages = list(full_messages)
+
+            while True:
+                stream = client.chat.completions.create(
+                    model=req.model,
+                    messages=messages,
+                    temperature=req.temperature,
+                    tools=TOOL_DEFINITIONS,
+                    tool_choice="auto",
+                    stream=True,
+                )
+
+                # Accumulate the streamed response
+                tool_calls_acc: dict[int, dict] = {}  # index → {id, name, arguments}
+                text_acc = ""
+                finish_reason = None
+
+                for chunk in stream:
+                    delta = chunk.choices[0].delta
+                    finish_reason = chunk.choices[0].finish_reason or finish_reason
+
+                    # Stream text tokens to client
+                    if delta.content:
+                        text_acc += delta.content
+                        yield sse({"token": delta.content})
+
+                    # Accumulate tool call chunks
+                    if delta.tool_calls:
+                        for tc in delta.tool_calls:
+                            idx = tc.index
+                            if idx not in tool_calls_acc:
+                                tool_calls_acc[idx] = {"id": "", "name": "", "arguments": ""}
+                            if tc.id:
+                                tool_calls_acc[idx]["id"] = tc.id
+                            if tc.function.name:
+                                tool_calls_acc[idx]["name"] = tc.function.name
+                            if tc.function.arguments:
+                                tool_calls_acc[idx]["arguments"] += tc.function.arguments
+
+                # No tool calls → done
+                if finish_reason != "tool_calls" or not tool_calls_acc:
+                    yield sse({"done": True})
+                    break
+
+                # Append assistant message with tool_calls
+                messages.append({
+                    "role": "assistant",
+                    "content": text_acc or None,
+                    "tool_calls": [
+                        {
+                            "id": tc["id"],
+                            "type": "function",
+                            "function": {"name": tc["name"], "arguments": tc["arguments"]},
+                        }
+                        for tc in tool_calls_acc.values()
+                    ],
+                })
+
+                # Execute each tool and append results
+                for tc in tool_calls_acc.values():
+                    logger.info("LLM called tool '%s'", tc["name"])
+                    yield sse({"tool_call": tc["name"]})  # notify frontend
+                    result = execute_tool(tc["name"], tc["arguments"])
+                    result_data = json.loads(result)
+
+                    # If a file was generated, notify frontend with download info
+                    if tc["name"] == "generate_file" and result_data.get("success"):
+                        abs_url = base_url + result_data["download_url"]
+                        # Patch result so LLM cites the absolute URL in its text response
+                        result_data["download_url"] = abs_url
+                        result = json.dumps(result_data)
+                        yield sse({"file": {
+                            "filename": result_data["filename"],
+                            "url": abs_url,
+                            "description": result_data["description"],
+                        }})
+
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": tc["id"],
+                        "content": result,
+                    })
+                # Loop: let LLM generate its final response after tool results
+
         except Exception as exc:
             logger.exception("Chat stream error")
             yield sse({"error": str(exc)})
@@ -380,6 +454,18 @@ def chat_export(req: ExportRequest) -> FileResponse:
         media_type="text/markdown",
         filename="résumé_conversation.md",
     )
+
+# FILE DOWNLOAD — serve generated files
+@app.get("/api/files/{filename}")
+def download_file(filename: str) -> FileResponse:
+    """Serve a previously generated file for download."""
+    # Security: only allow files from the generated_files directory
+    safe_name = Path(filename).name
+    file_path = settings.files_dir / safe_name
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Fichier introuvable.")
+    return FileResponse(str(file_path), filename=safe_name)
+
 
 # MODERATION — standalone endpoint
 @app.post("/api/moderate")
