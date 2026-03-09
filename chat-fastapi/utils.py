@@ -208,3 +208,74 @@ def moderate_text(text: str) -> ModerationResult:
     if mod.flagged:
         logger.warning("Content flagged by moderation: %s", mod.flagged_categories)
     return mod
+
+
+# ── File extraction ───────────────────────────────────────────────────────────
+
+SUPPORTED_UPLOAD_TYPES = {
+    "application/pdf",
+    "text/plain",
+    "text/csv",
+    "image/jpeg",
+    "image/png",
+    "image/gif",
+    "image/webp",
+}
+
+IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
+def extract_text_from_file(file_bytes: bytes, mime_type: str, filename: str) -> str:
+    """
+    Extract plain text from a PDF, TXT, or CSV file.
+    Returns the extracted text, truncated to 20 000 chars to fit in context.
+    """
+    if mime_type == "application/pdf":
+        import io
+        from pypdf import PdfReader
+        reader = PdfReader(io.BytesIO(file_bytes))
+        text = "\n\n".join(page.extract_text() or "" for page in reader.pages)
+    elif mime_type in ("text/plain", "text/csv"):
+        text = file_bytes.decode("utf-8", errors="replace")
+    else:
+        raise ValueError(f"Cannot extract text from mime type: {mime_type}")
+
+    MAX_CHARS = 20_000
+    if len(text) > MAX_CHARS:
+        text = text[:MAX_CHARS] + f"\n\n[... tronqué à {MAX_CHARS} caractères]"
+        logger.warning("File '%s' truncated to %d chars", filename, MAX_CHARS)
+
+    logger.info("Extracted %d chars from '%s'", len(text), filename)
+    return text
+
+
+def build_message_with_file(
+    user_text: str,
+    file_bytes: bytes,
+    mime_type: str,
+    filename: str,
+) -> dict:
+    """
+    Build an OpenAI message dict that includes an uploaded file.
+    - Images → multimodal content block (vision)
+    - PDF/TXT/CSV → text extraction injected as context
+    """
+    if mime_type in IMAGE_MIME_TYPES:
+        b64 = base64.b64encode(file_bytes).decode()
+        return {
+            "role": "user",
+            "content": [
+                {
+                    "type": "image_url",
+                    "image_url": {"url": f"data:{mime_type};base64,{b64}"},
+                },
+                {"type": "text", "text": user_text or "Qu'est-ce que tu vois dans cette image ?"},
+            ],
+        }
+    else:
+        extracted = extract_text_from_file(file_bytes, mime_type, filename)
+        combined = (
+            f"[Fichier joint : {filename}]\n\n{extracted}"
+            + (f"\n\n---\n{user_text}" if user_text else "")
+        )
+        return {"role": "user", "content": combined}

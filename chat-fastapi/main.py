@@ -1,9 +1,12 @@
+# uvicorn main:app --reload 2>&1 | tee app.log
+
 import base64
 import json
 import logging
 import re
 import uuid
 
+from typing import Optional
 from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
@@ -13,6 +16,8 @@ from pydantic import BaseModel, Field
 from config import settings
 from utils import (
     Message,
+    SUPPORTED_UPLOAD_TYPES,
+    build_message_with_file,
     client,
     generate_image,
     moderate_text,
@@ -261,6 +266,120 @@ async def voice_chat_stream(
 
     return StreamingResponse(generate(), media_type="text/event-stream")
 
+
+
+# FILE UPLOAD — chat with an attached file
+@app.post("/api/chat/upload/stream")
+async def chat_upload_stream(
+    file: UploadFile = File(...),
+    text: str = Form(""),
+    history: str = Form("[]"),
+    model: str = Form(settings.default_text_model),
+    temperature: float = Form(settings.default_temperature),
+) -> StreamingResponse:
+    """
+    Receive a file + optional text message, build a multimodal or text message,
+    and stream the LLM response via SSE.
+    """
+    mime_type = file.content_type or "application/octet-stream"
+    if mime_type not in SUPPORTED_UPLOAD_TYPES:
+        raise HTTPException(
+            status_code=415,
+            detail=f"Type de fichier non supporté : {mime_type}. Formats acceptés : PDF, TXT, CSV, JPG, PNG."
+        )
+
+    file_bytes = await file.read()
+    if len(file_bytes) > 20 * 1024 * 1024:  # 20 MB limit
+        raise HTTPException(status_code=413, detail="Fichier trop volumineux (max 20 Mo).")
+
+    # Moderate text part if provided
+    if text.strip():
+        _check_moderation(text)
+
+    # Build the enriched message
+    try:
+        file_message = build_message_with_file(text, file_bytes, mime_type, file.filename or "fichier")
+    except Exception as exc:
+        raise HTTPException(status_code=422, detail=f"Impossible de lire le fichier : {exc}") from exc
+
+    # Build full conversation
+    messages: list[Message] = json.loads(history)
+    messages.append(file_message)
+    full_messages = [{"role": "system", "content": settings.system_message}] + messages
+
+    def generate():
+        try:
+            stream = client.chat.completions.create(
+                model=model,
+                messages=full_messages,
+                temperature=temperature,
+                stream=True,
+            )
+            for chunk in stream:
+                token = chunk.choices[0].delta.content or ""
+                if token:
+                    yield sse({"token": token})
+            yield sse({"done": True})
+        except Exception as exc:
+            logger.exception("Chat upload stream error")
+            yield sse({"error": str(exc)})
+
+    return StreamingResponse(generate(), media_type="text/event-stream")
+
+
+# EXPORT — summarise conversation and return as a downloadable .md file
+class ExportRequest(BaseModel):
+    messages: list[Message]
+    model: str = settings.default_text_model
+
+
+@app.post("/api/chat/export")
+def chat_export(req: ExportRequest) -> FileResponse:
+    """
+    Ask the LLM to produce a structured summary of the conversation,
+    then return it as a downloadable Markdown file.
+    """
+    if not req.messages:
+        raise HTTPException(status_code=400, detail="Aucun message à exporter.")
+
+    # Build a readable transcript for the LLM
+    transcript_lines = []
+    for m in req.messages:
+        role_label = "Utilisateur" if m["role"] == "user" else "Assistant"
+        content = m["content"] if isinstance(m["content"], str) else "[fichier joint]"
+        transcript_lines.append(f"**{role_label}** : {content}")
+    transcript = "\n\n".join(transcript_lines)
+
+    summary_prompt = (
+        "Voici une conversation entre un utilisateur et un assistant IA.\n\n"
+        f"{transcript}\n\n"
+        "Rédige un résumé structuré de cette conversation en Markdown, avec :\n"
+        "- Un titre\n"
+        "- Les points clés abordés\n"
+        "- Les décisions ou conclusions importantes\n"
+        "- Un résumé final en 2-3 phrases"
+    )
+
+    try:
+        response = client.chat.completions.create(
+            model=req.model,
+            messages=[{"role": "user", "content": summary_prompt}],
+            temperature=0.3,
+        )
+        summary_md = response.choices[0].message.content
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+    # Write to a temp file and serve it
+    out_path = settings.tmp_dir / f"export_{uuid.uuid4()}.md"
+    out_path.write_text(summary_md, encoding="utf-8")
+    logger.info("Chat exported to %s", out_path)
+
+    return FileResponse(
+        str(out_path),
+        media_type="text/markdown",
+        filename="résumé_conversation.md",
+    )
 
 # MODERATION — standalone endpoint
 @app.post("/api/moderate")

@@ -129,6 +129,29 @@
   .status.error { color:var(--accent2); }
   .status.ok { color:var(--success); }
   .status.moderated { color:#ff9800; font-weight:500; }
+  /* ── File attachment ── */
+  .file-preview {
+    display: flex; align-items: center; gap: 10px;
+    background: var(--surface2); border: 1px solid var(--border);
+    border-radius: var(--radius); padding: 8px 12px;
+    font-size: .82rem; color: var(--text2);
+    animation: fadeUp .2s ease;
+  }
+  .file-preview .file-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+  .file-preview .file-type { font-family: var(--mono); font-size: .72rem; background: var(--border); padding: 2px 6px; border-radius: 4px; }
+  .file-preview .file-remove { cursor: pointer; color: var(--accent2); font-size: 1rem; flex-shrink: 0; }
+  .file-preview img { width: 40px; height: 40px; object-fit: cover; border-radius: 6px; }
+  .message.assistant .bubble.with-file::before {
+    content: '📎'; font-size: .75rem; color: var(--text2); display: block; margin-bottom: 4px;
+  }
+  /* hidden file input */
+  #chat-file-input {
+    position: absolute;
+    width: 1px; height: 1px;
+    opacity: 0; overflow: hidden;
+    pointer-events: none;
+  }
+
 </style>
 </head>
 <body>
@@ -201,11 +224,17 @@
     <div class="chat-messages" id="chat-messages"></div>
     <div class="chat-input-area">
       <div class="input-row">
-        <button class="btn-icon" id="chat-mic-btn" title="Enregistrer">🎤</button>
+        <button class="btn-icon" id="chat-mic-btn" title="Dicter">🎤</button>
         <span class="status" id="chat-mic-status"></span>
-        <button class="btn btn-danger" id="chat-clear-btn" style="margin-left:auto">🗑️ Effacer</button>
+        <div style="margin-left:auto;display:flex;gap:8px">
+          <button class="btn btn-secondary" id="chat-export-btn" title="Exporter le résumé">📥 Exporter</button>
+          <button class="btn btn-danger" id="chat-clear-btn">🗑️ Effacer</button>
+        </div>
       </div>
+      <div id="chat-file-preview" style="display:none"></div>
       <div class="input-row">
+        <label for="chat-file-input" class="btn-icon" id="chat-attach-btn" title="Joindre un fichier" style="cursor:pointer">📎</label>
+        <input type="file" id="chat-file-input" accept=".pdf,.txt,.csv,image/jpeg,image/png,image/gif,image/webp" />
         <textarea id="chat-textarea" placeholder="Écris ton message... (Enter pour envoyer, Shift+Enter pour nouvelle ligne)" rows="1"></textarea>
         <button class="btn btn-primary" id="chat-send-btn">Envoyer</button>
       </div>
@@ -337,9 +366,10 @@ function makeRecorder(onStop) {
 }
 
 // ═══════════════════════════════════════════
-// TEXT CHAT — streaming
+// TEXT CHAT — streaming + file upload
 // ═══════════════════════════════════════════
 let chatHistory = [];
+let pendingFile = null; // { file: File } | null
 
 function appendMessage(role, content = '') {
   const wrap = $('chat-messages');
@@ -355,67 +385,130 @@ function appendMessage(role, content = '') {
   return bubble;
 }
 
+function setPendingFile(file) {
+  pendingFile = file ? { file } : null;
+  const previewEl = $('chat-file-preview');
+  if (!file) { previewEl.style.display = 'none'; previewEl.innerHTML = ''; return; }
+  previewEl.style.display = 'block';
+  const isImage = file.type.startsWith('image/');
+  if (isImage) {
+    const reader = new FileReader();
+    reader.onload = e => {
+      previewEl.innerHTML = `<div class="file-preview">
+        <img src="${e.target.result}" alt="preview" />
+        <span class="file-name">${file.name}</span>
+        <span class="file-type">${file.type.split('/')[1].toUpperCase()}</span>
+        <span class="file-remove" id="file-remove-btn">✕</span>
+      </div>`;
+      $('file-remove-btn').onclick = () => setPendingFile(null);
+    };
+    reader.readAsDataURL(file);
+  } else {
+    const icon = file.type === 'application/pdf' ? '📄' : '📋';
+    const ext = file.name.split('.').pop().toUpperCase();
+    previewEl.innerHTML = `<div class="file-preview">
+      <span style="font-size:1.4rem">${icon}</span>
+      <span class="file-name">${file.name}</span>
+      <span class="file-type">${ext}</span>
+      <span class="file-remove" id="file-remove-btn">✕</span>
+    </div>`;
+    $('file-remove-btn').onclick = () => setPendingFile(null);
+  }
+}
+
+// Wire file input → preview
+$('chat-file-input').addEventListener('change', e => {
+  const file = e.target.files[0];
+  if (file) setPendingFile(file);
+  e.target.value = ''; // allow re-selecting the same file
+});
+
+// Stream helper shared by text-only and file paths
+async function streamSSEInto(res, bubble, cursor, onDone) {
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '', fullText = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const lines = buf.split('\n');
+    buf = lines.pop();
+    for (const line of lines) {
+      if (!line.startsWith('data: ')) continue;
+      const evt = JSON.parse(line.slice(6));
+      if (evt.token) {
+        fullText += evt.token;
+        bubble.textContent = fullText;
+        bubble.appendChild(cursor);
+        $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
+      }
+      if (evt.done) { cursor.remove(); if (onDone) onDone(fullText); }
+      if (evt.error) { bubble.textContent = '❌ ' + evt.error; cursor.remove(); }
+    }
+  }
+  return fullText;
+}
+
 async function sendChatMessage(text) {
-  if (!text.trim()) return;
+  const hasFile = !!pendingFile;
+  if (!text.trim() && !hasFile) return;
   const s = settings();
-  appendMessage('user', text);
-  chatHistory.push({ role: 'user', content: text });
+
+  const displayText = text.trim() || `📎 ${pendingFile.file.name}`;
+  appendMessage('user', displayText);
+  chatHistory.push({ role: 'user', content: displayText });
 
   $('chat-send-btn').disabled = true;
+  $('chat-attach-btn').style.pointerEvents = 'none';
   $('chat-status').innerHTML = '<span class="spinner"></span>';
 
-  // Create assistant bubble with cursor
   const bubble = appendMessage('assistant');
   const cursor = document.createElement('span');
   cursor.className = 'cursor';
   bubble.appendChild(cursor);
 
-  let fullText = '';
+  const fileSnapshot = pendingFile;
+  setPendingFile(null);
 
+  let fullText = '';
   try {
-    const res = await fetch('/api/chat/stream', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages: chatHistory, model: s.textModel, temperature: s.temperature }),
-    });
+    let res;
+    if (hasFile) {
+      const historyWithoutLast = chatHistory.slice(0, -1);
+      const fd = new FormData();
+      fd.append('file', fileSnapshot.file);
+      fd.append('text', text.trim());
+      fd.append('history', JSON.stringify(historyWithoutLast));
+      fd.append('model', s.textModel);
+      fd.append('temperature', s.temperature);
+      res = await fetch('/api/chat/upload/stream', { method: 'POST', body: fd });
+    } else {
+      res = await fetch('/api/chat/stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messages: chatHistory, model: s.textModel, temperature: s.temperature }),
+      });
+    }
 
     if (!res.ok) {
       bubble.textContent = await parseError(res);
       cursor.remove();
-      chatHistory.pop(); // remove the flagged user message from history
+      chatHistory.pop();
       return;
     }
 
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    let buf = '';
+    fullText = await streamSSEInto(res, bubble, cursor);
 
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      buf += decoder.decode(value, { stream: true });
-      const lines = buf.split('\n');
-      buf = lines.pop();
-      for (const line of lines) {
-        if (!line.startsWith('data: ')) continue;
-        const evt = JSON.parse(line.slice(6));
-        if (evt.token) {
-          fullText += evt.token;
-          bubble.textContent = fullText;
-          bubble.appendChild(cursor);
-          $('chat-messages').scrollTop = $('chat-messages').scrollHeight;
-        }
-        if (evt.done) { cursor.remove(); }
-        if (evt.error) { bubble.textContent = '❌ ' + evt.error; cursor.remove(); }
-      }
-    }
   } catch(e) {
     bubble.textContent = '❌ ' + e.message;
     cursor.remove();
   } finally {
     $('chat-send-btn').disabled = false;
+    $('chat-attach-btn').style.pointerEvents = '';
     $('chat-status').textContent = '';
-    chatHistory.push({ role: 'assistant', content: fullText });
+    if (fullText) chatHistory.push({ role: 'assistant', content: fullText });
+    else chatHistory.pop();
   }
 }
 
@@ -432,7 +525,42 @@ $('chat-send-btn').addEventListener('click', () => {
   $('chat-textarea').value = '';
   sendChatMessage(val);
 });
-$('chat-clear-btn').addEventListener('click', () => { chatHistory = []; $('chat-messages').innerHTML = ''; });
+$('chat-clear-btn').addEventListener('click', () => {
+  chatHistory = [];
+  $('chat-messages').innerHTML = '';
+  setPendingFile(null);
+});
+
+$('chat-export-btn').addEventListener('click', async () => {
+  if (chatHistory.length === 0) {
+    $('chat-status').textContent = 'Aucun message à exporter.';
+    return;
+  }
+  $('chat-export-btn').disabled = true;
+  $('chat-status').innerHTML = '<span class="spinner"></span>Génération du résumé...';
+  try {
+    const s = settings();
+    const res = await fetch('/api/chat/export', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: chatHistory, model: s.textModel }),
+    });
+    if (!res.ok) throw new Error(await parseError(res));
+    const blob = await res.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = 'résumé_conversation.md';
+    a.click();
+    URL.revokeObjectURL(url);
+    $('chat-status').textContent = '✅ Résumé exporté';
+  } catch(e) {
+    $('chat-status').textContent = '❌ ' + e.message;
+    $('chat-status').className = 'status error';
+  } finally {
+    $('chat-export-btn').disabled = false;
+    setTimeout(() => $('chat-status').textContent = '', 3000);
+  }
+});
 
 // Mic → transcribe → fill textarea
 const chatRecorder = makeRecorder(blob => {
